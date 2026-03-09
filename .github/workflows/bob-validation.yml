@@ -1,0 +1,90 @@
+name: Bob Content Validation
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    types: [opened, edited, synchronize]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install anthropic requests
+      
+      - name: Collect content
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+        run: |
+          python3 .github/scripts/collect_content.py
+      
+      - name: Validate with Bob
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.IBM_ANTHROPIC_KEY }}
+        run: |
+          python3 .github/scripts/bob_validator.py
+      
+      - name: Post results to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync('bob_report.json', 'utf8'));
+            } catch (e) {
+              return;
+            }
+            
+            let comment = '## 🤖 Bob Validation Report\n\n';
+            
+            if (report.approved) {
+              comment += '### ✅ APPROVED\n\n';
+              comment += `**Summary:** ${report.summary}\n\n`;
+            } else {
+              comment += '### ❌ VALIDATION FAILED\n\n';
+              comment += `**Severity:** ${report.overall_severity.toUpperCase()}\n\n`;
+              comment += `**Summary:** ${report.summary}\n\n`;
+              comment += `#### Issues (${report.issues.length})\n\n`;
+              
+              report.issues.forEach((issue, i) => {
+                comment += `**${i + 1}. [${issue.severity.toUpperCase()}] ${issue.category}**\n`;
+                comment += `- Location: ${issue.location}\n`;
+                comment += `- Issue: ${issue.description}\n`;
+                if (issue.suggestion) {
+                  comment += `- Fix: ${issue.suggestion}\n`;
+                }
+                comment += '\n';
+              });
+            }
+            
+            comment += '\n*Validated by Bob - IBM AI Content Filter*';
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
